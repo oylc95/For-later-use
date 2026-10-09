@@ -1,0 +1,63 @@
+name: DeepSeek runner smoke test
+
+on:
+  push:
+    branches: [codex-sync-probe]
+    paths:
+      - .github/dsh/account-route.patch.yml
+      - .github/workflows/deepseek-runner-smoke.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: [self-hosted, Windows, deepseek-harness]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Harness and verify its file output
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $command = Get-Command dsh.cmd -ErrorAction SilentlyContinue
+          if ($command) {
+            $dsh = $command.Source
+          } else {
+            $dsh = 'D:\Software_3\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd'
+          }
+          if (-not (Test-Path -LiteralPath $dsh)) {
+            throw 'dsh.cmd was not found. Add it to PATH or update the workflow path.'
+          }
+
+          $patch = Join-Path $env:GITHUB_WORKSPACE '.github\dsh\account-route.patch.yml'
+          $work = Join-Path $env:RUNNER_TEMP ('deepseek-smoke-' + $env:GITHUB_RUN_ID)
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+          Set-Content -LiteralPath (Join-Path $work 'input.txt') -Value @('2', '3', '5')
+          Push-Location $work
+          try {
+            $task = 'Read input.txt in the current directory. Write result.json as a JSON object with count equal to the number of integers and sum equal to their total. Then reply done.'
+            & $dsh --profile headless --patch $patch --json $task > (Join-Path $work 'events.jsonl') 2> (Join-Path $work 'diagnostics.txt')
+            if ($LASTEXITCODE -ne 0) {
+              throw "DeepSeek Harness exited with code $LASTEXITCODE. Inspect the local runner diagnostics."
+            }
+          } finally {
+            Pop-Location
+          }
+
+          $resultPath = Join-Path $work 'result.json'
+          if (-not (Test-Path -LiteralPath $resultPath)) {
+            throw 'DeepSeek Harness did not create result.json.'
+          }
+          $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+          if ($result.count -ne 3 -or $result.sum -ne 10) {
+            throw 'DeepSeek Harness produced an incorrect result.'
+          }
+          Write-Output "Verified on runner $env:RUNNER_NAME : count=3, sum=10"
+          Copy-Item -LiteralPath $resultPath -Destination (Join-Path $env:GITHUB_WORKSPACE 'result.json')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deepseek-smoke-result
+          path: result.json
+          if-no-files-found: error
